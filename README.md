@@ -1,6 +1,10 @@
 # REDESIPCORE — Hub Central de Aplicaciones
 
-Portal centralizado que actúa como punto de acceso único para las aplicaciones internas de la organización. Permite la autenticación de usuarios contra múltiples servidores de base de datos remotos, gestiona departamentos y roles, y controla la visibilidad de aplicaciones según el perfil de cada usuario.
+Portal centralizado que actúa como punto de acceso único para las aplicaciones internas de la organización. Permite la autenticación de usuarios contra múltiples servidores de base de datos remotos (MSSQL, PostgreSQL, MySQL), gestiona departamentos con roles por usuario y controla la visibilidad de aplicaciones según el perfil de cada usuario.
+
+**Repositorio:** https://github.com/mitotkp/REDESIPCORE  
+**Versión actual:** 1.0.0  
+**Estado:** Backend completo — pendiente frontend
 
 ---
 
@@ -10,16 +14,23 @@ Portal centralizado que actúa como punto de acceso único para las aplicaciones
 - [Tecnologías](#tecnologías)
 - [Estructura del proyecto](#estructura-del-proyecto)
 - [Instalación](#instalación)
+  - [Sin Docker](#sin-docker)
+  - [Con Docker](#con-docker)
 - [Configuración](#configuración)
 - [Base de datos MySQL](#base-de-datos-mysql)
+- [Docker automático al arranque](#docker-automático-al-arranque)
+- [Logs](#logs)
+- [Tests](#tests)
 - [API Reference](#api-reference)
   - [Autenticación](#autenticación)
   - [Servidores](#servidores)
   - [Departamentos](#departamentos)
   - [Aplicaciones](#aplicaciones)
+  - [Auditoría](#auditoría)
 - [Sistema de roles y visibilidad](#sistema-de-roles-y-visibilidad)
 - [Formato de apps.json](#formato-de-appsjson)
-- [Flujo de autenticación](#flujo-de-autenticación)
+- [Flujo completo de sesión](#flujo-completo-de-sesión)
+- [Paginación](#paginación)
 
 ---
 
@@ -29,31 +40,34 @@ Portal centralizado que actúa como punto de acceso único para las aplicaciones
 Cliente / Frontend
         │
         ▼
-┌──────────────────────────────────────────┐
-│            REDESIPCORE (FastAPI)         │
-│                                          │
-│  ┌─────────┐  ┌────────────┐  ┌───────┐ │
-│  │  /auth  │  │/servidores │  │ /apps │ │
-│  └────┬────┘  └─────┬──────┘  └───┬───┘ │
-│       │             │             │      │
-│  ┌────▼─────────────▼──────┐  ┌───▼───┐ │
-│  │   Servidores Remotos    │  │MySQL  │ │
-│  │  (MSSQL / PostgreSQL)   │  │Local  │ │
-│  │  USUARIOS, EMPRESAS...  │  │Depto/ │ │
-│  └─────────────────────────┘  │Roles  │ │
-│                                └───────┘ │
-│                             ┌──────────┐ │
-│                             │apps.json │ │
-│                             └──────────┘ │
-└──────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────┐
+│                  REDESIPCORE (FastAPI)                │
+│                                                       │
+│  ┌──────────┐ ┌────────────┐ ┌───────┐ ┌──────────┐  │
+│  │  /auth   │ │/servidores │ │ /apps │ │ /audit   │  │
+│  └────┬─────┘ └─────┬──────┘ └───┬───┘ └────┬─────┘  │
+│       │             │            │           │        │
+│  ┌────▼─────────────▼────────────▼───────────▼──────┐ │
+│  │              MySQL Local (redesipcore_hub)        │ │
+│  │  departamentos · usuarios_departamentos           │ │
+│  │  refresh_tokens · auditoria                       │ │
+│  └───────────────────────────────────────────────────┘ │
+│                                                       │
+│  ┌─────────────────────────────┐   ┌───────────────┐  │
+│  │     Servidores Remotos      │   │   apps.json   │  │
+│  │  MSSQL · PostgreSQL · MySQL │   │  Catálogo de  │  │
+│  │  USUARIOS · EMPRESAS...     │   │  aplicaciones │  │
+│  └─────────────────────────────┘   └───────────────┘  │
+└───────────────────────────────────────────────────────┘
 ```
 
-**Dos capas de datos:**
+**Tres capas de datos:**
 
 | Capa | Almacenamiento | Contenido |
 |---|---|---|
-| Remota | MSSQL / PostgreSQL (servidores de la empresa) | Usuarios, empresas, contraseñas |
-| Local | MySQL + JSON | Departamentos, roles, catálogo de apps |
+| Remota | MSSQL / PostgreSQL / MySQL (servidores de la empresa) | Usuarios, empresas, contraseñas |
+| Local BD | MySQL `redesipcore_hub` | Departamentos, roles, tokens, auditoría |
+| Local JSON | `apps.json` / `connections.json` | Catálogo de apps, configs de servidores |
 
 ---
 
@@ -65,9 +79,12 @@ Cliente / Frontend
 | Servidor ASGI | Uvicorn | 0.46.0 |
 | ORM | SQLAlchemy | 2.0.49 |
 | Validación | Pydantic | 2.13.3 |
-| Auth tokens | python-jose | — |
-| BD local | MySQL + PyMySQL | — |
-| BD remotas | MSSQL / PostgreSQL | — |
+| Auth / JWT | python-jose | ≥ 3.3.0 |
+| BD local | MySQL + PyMySQL | ≥ 1.1.0 |
+| BD remotas MSSQL | pyodbc | ≥ 5.0.0 |
+| BD remotas PG | psycopg2-binary | ≥ 2.9.0 |
+| Docker SDK | docker | ≥ 7.0.0 |
+| Tests | pytest + httpx | ≥ 8.0.0 |
 
 ---
 
@@ -75,103 +92,134 @@ Cliente / Frontend
 
 ```
 REDESIPCORE/
-├── main.py                          # Punto de entrada FastAPI
-├── .env                             # Variables de entorno (no commitear)
+├── main.py                          # Punto de entrada — lifespan, logging, routers
+├── .env                             # Variables de entorno (NO commitear)
+├── .env.example                     # Plantilla de configuración
+├── requirements.txt                 # Dependencias Python
+├── Dockerfile                       # Imagen Docker de la app
+├── docker-compose.yml               # Orquestación app + MySQL
+├── .dockerignore
+├── .gitignore
 │
 ├── hub_central/
 │   ├── classes/
-│   │   └── models.py               # Schemas Pydantic (request/response)
+│   │   └── models.py               # Schemas Pydantic (request/response bodies)
 │   │
 │   ├── database/
-│   │   ├── database.py             # Conexión MySQL + sesión SQLAlchemy
-│   │   └── models.py               # Modelos ORM: Departamento, UsuarioDepartamento
+│   │   ├── database.py             # Engine MySQL, sesión, inicializar_db()
+│   │   └── models.py               # ORM: Departamento, UsuarioDepartamento,
+│   │                               #      RefreshToken, Auditoria
 │   │
 │   ├── helpers/
+│   │   ├── auth_deps.py            # Dependencias JWT compartidas entre routers
+│   │   ├── audit.py                # Helper auditar(db, payload, accion, detalle)
+│   │   ├── apps_helper.py          # Lectura/escritura de apps.json
+│   │   ├── connection_helper.py    # Constructor de URLs por tipo de BD
 │   │   ├── db_helper.py            # Ejecutor de consultas en servidores remotos
+│   │   ├── docker_check.py         # Verificación y arranque automático de MySQL via Docker
 │   │   ├── encryption.py           # Encriptación de contraseñas (formato legado)
 │   │   ├── jsonsPath.py            # Carga de connections.json
-│   │   └── apps_helper.py          # Lectura/escritura de apps.json
+│   │   └── logging_config.py       # Configuración de logs estructurados
 │   │
 │   ├── jsons/
-│   │   ├── connections.json        # Configuración de servidores remotos
-│   │   └── apps.json               # Catálogo de aplicaciones registradas
+│   │   ├── connections.json        # Servidores remotos (generado por la API)
+│   │   ├── connections.json.example
+│   │   └── apps.json               # Catálogo de aplicaciones (generado por la API)
 │   │
 │   └── routers/
-│       ├── auth.py                 # Autenticación de usuarios
-│       ├── servidores.py           # Gestión de servidores remotos
-│       ├── deparments.py           # Departamentos y asignación de roles
-│       ├── apps.py                 # Registro y visibilidad de aplicaciones
-│       └── integrations.py         # (Reservado para integraciones futuras)
+│       ├── auth.py                 # login, refresh, logout
+│       ├── servidores.py           # Registro y consulta de servidores remotos
+│       ├── deparments.py           # CRUD departamentos + asignación de roles
+│       ├── apps.py                 # CRUD apps + visibilidad por rol
+│       ├── audit.py                # Consulta de registros de auditoría
+│       └── integrations.py         # (Reservado)
 │
-└── venv/                           # Entorno virtual Python
+└── tests/
+    ├── conftest.py                  # Fixtures: SQLite en memoria, mocks de JWT
+    ├── test_auth.py                 # Tests de refresh token y logout
+    ├── test_departamentos.py        # Tests de CRUD y asignación de roles
+    ├── test_apps.py                 # Tests de catálogo y visibilidad
+    └── test_servidores.py           # Tests de servidores y paginación
 ```
 
 ---
 
 ## Instalación
 
+### Sin Docker
+
 ```bash
-# 1. Clonar el repositorio
-git clone https://github.com/<usuario>/REDESIPCORE.git
+# 1. Clonar
+git clone https://github.com/mitotkp/REDESIPCORE.git
 cd REDESIPCORE
 
-# 2. Crear y activar entorno virtual
+# 2. Entorno virtual
 python -m venv venv
+source venv/bin/activate        # Linux/macOS
+venv\Scripts\activate           # Windows
 
-# Windows
-venv\Scripts\activate
+# 3. Dependencias
+pip install -r requirements.txt
 
-# Linux / macOS
-source venv/bin/activate
-
-# 3. Instalar dependencias
-pip install fastapi uvicorn sqlalchemy pymysql python-dotenv \
-            python-jose[cryptography] pydantic pyodbc
-
-# 4. Configurar variables de entorno (ver sección Configuración)
+# 4. Configuración
 cp .env.example .env
+# Editar .env con tus credenciales
 
-# 5. Crear la base de datos MySQL (ver sección MySQL)
-
-# 6. Iniciar el servidor
+# 5. Arrancar (la app crea la BD y tablas automáticamente)
 uvicorn main:app --reload
 ```
+
+### Con Docker
+
+```bash
+cp .env.example .env
+# Editar .env con tus credenciales
+
+docker compose up --build
+```
+
+El compose levanta **MySQL 8.0** y la **app** en orden correcto usando healthcheck. Los archivos `apps.json` y `connections.json` se montan como volumen y persisten entre reinicios.
 
 ---
 
 ## Configuración
 
-Edita el archivo `.env` en la raíz del proyecto:
+Copia `.env.example` a `.env` y edita los valores:
 
 ```env
-# JWT
-SECRET_KEY   = "tu_clave_secreta_muy_larga"
+# ── JWT ───────────────────────────────────────────────
+SECRET_KEY   = "clave_larga_y_aleatoria_minimo_32_caracteres"
 ALGORITHM    = "HS256"
 
-# Clave para operaciones administrativas (header X-Admin-Key)
-ADMIN_SECRET = "tu_clave_admin_segura"
+# ── Operaciones administrativas ───────────────────────
+# Se envía como header X-Admin-Key en endpoints de escritura
+ADMIN_SECRET = "clave_admin_segura"
 
-# MySQL — base de datos local del hub
+# ── MySQL local (base de datos del hub) ───────────────
 MYSQL_HOST = "localhost"
 MYSQL_PORT = "3306"
 MYSQL_DB   = "redesipcore_hub"
 MYSQL_USER = "hub_user"
-MYSQL_PASS = "tu_password_mysql"
+MYSQL_PASS = "password_mysql"
+
+# ── Docker (opcional) ─────────────────────────────────
+# Usado por docker-compose y por el check automático al arranque
+MYSQL_ROOT_PASS      = "root_password_seguro"
+MYSQL_CONTAINER_NAME = "redesipcore_mysql"
 ```
 
-> **Importante:** nunca subas el `.env` real a un repositorio público. El `.gitignore` ya lo excluye.
+> El archivo `.env` real está excluido del repositorio por `.gitignore`.
 
 ---
 
 ## Base de datos MySQL
 
-El hub usa MySQL para almacenar su información propia (departamentos y roles). Las tablas se crean automáticamente al iniciar la aplicación.
+La app **crea la base de datos y todas las tablas automáticamente** al arrancar. No se requiere ningún comando SQL manual.
 
-### Crear la base de datos y el usuario
+Si prefieres crearla tú mismo:
 
 ```sql
 CREATE DATABASE redesipcore_hub CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-
 CREATE USER 'hub_user'@'localhost' IDENTIFIED BY 'tu_password';
 GRANT ALL PRIVILEGES ON redesipcore_hub.* TO 'hub_user'@'localhost';
 FLUSH PRIVILEGES;
@@ -180,42 +228,161 @@ FLUSH PRIVILEGES;
 ### Tablas generadas automáticamente
 
 #### `departamentos`
-
 | Columna | Tipo | Descripción |
 |---|---|---|
 | id | INT PK AUTO | Identificador único |
 | nombre | VARCHAR(100) | Nombre del departamento |
 | descripcion | VARCHAR(255) | Descripción opcional |
-| servidor_id | VARCHAR(100) | Servidor remoto al que pertenece |
+| servidor_id | VARCHAR(100) | Servidor remoto asociado |
 | empresa_cod | VARCHAR(50) | Código de empresa (CODEMPRESA) |
 
 #### `usuarios_departamentos`
-
 | Columna | Tipo | Descripción |
 |---|---|---|
 | id | INT PK AUTO | Identificador único |
 | cod_usuario | VARCHAR(50) | CODUSUARIO del servidor remoto |
 | servidor_id | VARCHAR(100) | Servidor remoto del usuario |
-| departamento_id | INT FK | Referencia a `departamentos.id` |
-| rol | VARCHAR(20) | Rol: `admin`, `jefe` o `empleado` |
+| departamento_id | INT FK | → `departamentos.id` (CASCADE) |
+| rol | VARCHAR(20) | `admin` \| `jefe` \| `empleado` |
 
-> La combinación `(cod_usuario, servidor_id, departamento_id)` es única — un usuario no puede tener dos roles en el mismo departamento.
+> Restricción única: `(cod_usuario, servidor_id, departamento_id)` — un usuario tiene un solo rol por departamento.
+
+#### `refresh_tokens`
+| Columna | Tipo | Descripción |
+|---|---|---|
+| id | INT PK AUTO | Identificador único |
+| token | VARCHAR(512) UNIQUE | Token seguro (64 bytes urlsafe) |
+| cod_usuario | VARCHAR(50) | Usuario propietario |
+| servidor_id | VARCHAR(100) | Servidor del usuario |
+| usuario | VARCHAR(100) | Nombre de usuario |
+| expires_at | DATETIME | Expiración (7 días desde creación) |
+| revocado | BOOLEAN | `true` tras logout |
+| created_at | DATETIME | Fecha de creación |
+
+#### `auditoria`
+| Columna | Tipo | Descripción |
+|---|---|---|
+| id | INT PK AUTO | Identificador único |
+| timestamp | DATETIME | Fecha y hora del evento |
+| cod_usuario | VARCHAR(50) | Quién realizó la acción |
+| servidor_id | VARCHAR(100) | Desde qué servidor |
+| accion | VARCHAR(100) | Tipo de acción (ver tabla abajo) |
+| detalle | VARCHAR(500) | Información adicional opcional |
+
+**Acciones registradas:**
+
+| Acción | Cuándo se registra |
+|---|---|
+| `LOGIN` | Inicio de sesión exitoso |
+| `LOGOUT` | Cierre de sesión |
+| `TOKEN_REFRESH` | Renovación de access token |
+| `SERVIDOR_REGISTRADO` | Registro de nuevo servidor remoto |
+| `DEPARTAMENTO_CREADO` | Creación de departamento |
+| `DEPARTAMENTO_ELIMINADO` | Eliminación de departamento |
+| `USUARIO_ASIGNADO` | Asignación de usuario a departamento |
+| `USUARIO_ROL_ACTUALIZADO` | Cambio de rol de un usuario |
+| `USUARIO_REMOVIDO` | Remoción de usuario de departamento |
+| `APP_CREADA` | Registro de nueva app |
+| `APP_ACTUALIZADA` | Modificación de app |
+| `APP_ELIMINADA` | Eliminación de app |
+| `APP_PERMISOS_ACTUALIZADOS` | Cambio de permisos de una app |
+
+---
+
+## Docker automático al arranque
+
+Al iniciar, la app intenta detectar Docker y garantizar que el contenedor MySQL esté disponible:
+
+```
+1. ¿Está el SDK de Docker instalado?
+   NO → aviso en logs, continúa sin Docker
+   SÍ → intenta conectar al daemon
+
+2. ¿Responde el daemon Docker?
+   NO → aviso en logs, continúa sin Docker
+   SÍ → busca el contenedor "redesipcore_mysql"
+
+3. ¿Existe el contenedor?
+   SÍ, corriendo  → log informativo, nada que hacer
+   SÍ, detenido   → lo arranca
+   NO existe      → lo crea con las variables del .env
+
+4. En cualquier error → solo se registra en logs, la app NO se detiene
+```
+
+Para instalar el SDK de Docker:
+```bash
+pip install docker
+```
+
+---
+
+## Logs
+
+Todos los logs siguen el formato:
+```
+2026-05-01 14:32:05 | INFO     | hub_central.routers.auth | Login exitoso — usuario=jperez servidor=local
+2026-05-01 14:32:06 | WARNING  | hub_central.database.database | MySQL no disponible — reintento 1/10 en 3s...
+2026-05-01 14:33:01 | ERROR    | hub_central.helpers.docker_check | No se pudo crear el contenedor MySQL: ...
+```
+
+Niveles usados:
+- `INFO` — eventos normales de operación
+- `WARNING` — situaciones recuperables (MySQL tardando, Docker no disponible)
+- `ERROR` — fallos que requieren atención (contenedor no se pudo crear, error de auditoría)
+
+---
+
+## Tests
+
+Los tests usan **SQLite en memoria** como base de datos y mockean las dependencias externas (servidores remotos, Docker). No requieren MySQL ni ningún servidor corriendo.
+
+```bash
+# Instalar dependencias de test
+pip install pytest httpx
+
+# Correr todos los tests
+pytest tests/ -v
+
+# Correr un archivo específico
+pytest tests/test_apps.py -v
+```
+
+**19 casos de test distribuidos en 4 archivos:**
+
+| Archivo | Qué prueba |
+|---|---|
+| `test_auth.py` | Refresh válido/inválido/expirado/revocado; logout y doble-logout |
+| `test_departamentos.py` | Listar paginado, crear con/sin admin key, asignar roles, flujo CRUD completo |
+| `test_apps.py` | Crear/duplicar/permisos inválidos, paginación, `mis-apps` filtrado por rol |
+| `test_servidores.py` | Listar servidores, registrar (sin key, duplicado, fallo de conexión), paginación de empresas |
+
+Para agregar tests:
+```python
+# tests/test_mi_modulo.py
+def test_algo(client):          # client inyecta JWT mock + SQLite
+    r = client.get("/api/...")
+    assert r.status_code == 200
+
+def test_admin(client):         # operaciones admin
+    from tests.conftest import ADMIN_HEADERS
+    r = client.post("/api/...", json={...}, headers=ADMIN_HEADERS)
+    assert r.status_code == 201
+```
 
 ---
 
 ## API Reference
 
-La documentación interactiva está disponible en:
-- **Swagger UI:** `http://localhost:8000/docs`
-- **ReDoc:** `http://localhost:8000/redoc`
+Documentación interactiva: `http://localhost:8000/docs` (Swagger) · `http://localhost:8000/redoc`
 
-### Convenciones de autenticación
+### Convenciones
 
-| Tipo de acceso | Requerido |
-|---|---|
-| Endpoints públicos | Sin token |
-| Endpoints de usuario | Header `Authorization: Bearer <token>` |
-| Endpoints administrativos | Header `Authorization: Bearer <token>` + Header `X-Admin-Key: <clave>` |
+| Icono | Significado | Header requerido |
+|---|---|---|
+| (público) | Sin autenticación | — |
+| 🔒 | Requiere JWT | `Authorization: Bearer <access_token>` |
+| 🔒🔑 | Requiere JWT + clave admin | `Authorization: Bearer <token>` + `X-Admin-Key: <clave>` |
 
 ---
 
@@ -223,36 +390,74 @@ La documentación interactiva está disponible en:
 
 #### `POST /api/auth/login`
 
-Autentica a un usuario contra un servidor remoto registrado y devuelve un JWT.
+Autentica contra un servidor remoto y devuelve ambos tokens.
 
-**Request body:**
+**Request:**
 ```json
-{
-  "servidor": "local",
-  "password": "mi_password"
-}
+{ "servidor": "local", "password": "mi_password" }
 ```
 
-**Response exitoso `200`:**
+**Response `200`:**
 ```json
 {
-  "status": "success",
-  "message": "login exitoso",
-  "access_token": "eyJhbGciOiJIUzI1NiJ9...",
-  "token_type": "bearer"
+  "status":        "success",
+  "message":       "Login exitoso",
+  "access_token":  "eyJhbGciOiJIUzI1NiJ9...",
+  "refresh_token": "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW...",
+  "token_type":    "bearer"
 }
 ```
-
-**Errores posibles:**
 
 | Código | Motivo |
 |---|---|
 | 404 | Servidor no registrado |
 | 401 | Contraseña incorrecta |
 | 403 | Usuario bloqueado o descatalogado |
-| 500 | Error de conexión a la base de datos remota |
+| 500 | Error de conexión a BD remota |
 
-> El token tiene una vigencia de **8 horas**. Incluye `cod_usuario`, `usuario` y `servidor_id`.
+> El **access token** expira en **8 horas**. El **refresh token** expira en **7 días**.
+
+---
+
+#### `POST /api/auth/refresh`
+
+Renueva el access token usando el refresh token. No requiere relogeo.
+
+**Request:**
+```json
+{ "refresh_token": "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW..." }
+```
+
+**Response `200`:**
+```json
+{
+  "status":       "success",
+  "access_token": "eyJhbGciOiJIUzI1NiJ9...",
+  "token_type":   "bearer"
+}
+```
+
+| Código | Motivo |
+|---|---|
+| 401 | Refresh token inexistente, expirado o revocado |
+
+---
+
+#### `POST /api/auth/logout`
+
+Revoca el refresh token. El access token actual sigue válido hasta su expiración natural.
+
+**Request:**
+```json
+{ "refresh_token": "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW..." }
+```
+
+**Response `200`:**
+```json
+{ "status": "success", "mensaje": "Sesión cerrada correctamente." }
+```
+
+> Si el token no existe, responde `200` igualmente (operación idempotente).
 
 ---
 
@@ -260,138 +465,103 @@ Autentica a un usuario contra un servidor remoto registrado y devuelve un JWT.
 
 #### `GET /api/servidores/`
 
-Lista los servidores remotos registrados en el hub.
+Lista los identificadores de servidores remotos registrados.
 
-**Response `200`:**
 ```json
-{
-  "total": 3,
-  "servidores_disponibles": ["sede_central", "sucursal_norte", "local"]
-}
+{ "total": 2, "servidores_disponibles": ["local", "sede_central"] }
 ```
 
 ---
 
-#### `POST /api/servidores/registrar`
+#### `POST /api/servidores/registrar` 🔒🔑
 
-Registra un nuevo servidor remoto. Antes de guardarlo, prueba la conexión.
+Registra un servidor remoto. Prueba la conexión antes de guardar. Soporta MSSQL, PostgreSQL y MySQL.
 
-**Request body:**
+**Request:**
 ```json
 {
-  "servidor":  "mi_servidor",
-  "host":      "192.168.1.50",
-  "puerto":    1433,
-  "db_name":   "GENERAL",
-  "tipo":      "mssql",
-  "driver":    "SQL Server",
-  "usuario":   "hub_user",
-  "password":  "mi_pass"
+  "servidor": "sucursal_norte",
+  "host":     "10.0.0.50",
+  "puerto":   1433,
+  "db_name":  "GENERAL",
+  "tipo":     "mssql",
+  "driver":   "SQL Server",
+  "usuario":  "sa",
+  "password": "mi_pass"
 }
 ```
 
-**Response `200`:**
-```json
-{
-  "status": "success",
-  "mensaje": "Servidor 'mi_servidor' verificado y registrado correctamente."
-}
-```
+**Tipos soportados:** `mssql` / `sqlserver`, `postgresql` / `postgres`, `mysql` / `mariadb`
 
 ---
 
 #### `GET /api/servidores/listarEmpresas` 🔒
 
-Lista todas las empresas disponibles en el servidor del usuario autenticado.
+Lista todas las empresas del servidor del usuario autenticado. Paginado.
 
-**Response `200`:**
-```json
-{
-  "status": "success",
-  "empresas": [
-    { "CODEMPRESA": "001", "TITULO": "Empresa Principal", "PATHBD": "...", "PAIS": "VE" }
-  ]
-}
+```
+GET /api/servidores/listarEmpresas?pagina=1&tamano=20
 ```
 
 ---
 
 #### `GET /api/servidores/listarEmpresasUsuario` 🔒
 
-Lista únicamente las empresas asignadas al usuario autenticado.
+Lista las empresas asignadas al usuario autenticado. Paginado.
 
 ---
 
 ### Departamentos
 
-Todos los endpoints requieren JWT (`Authorization: Bearer <token>`).  
-Los endpoints de escritura requieren además `X-Admin-Key`.
+Todos requieren 🔒. Los de escritura requieren además 🔑.
 
 #### `GET /api/departamentos/` 🔒
 
-Lista los departamentos del servidor del usuario autenticado.
+Lista los departamentos del servidor del usuario. Paginado.
 
-**Response `200`:**
+```
+GET /api/departamentos/?pagina=1&tamano=20
+```
+
+**Response:**
 ```json
 {
-  "status": "success",
+  "status": "success", "total": 3, "pagina": 1, "tamano": 20, "paginas": 1,
   "departamentos": [
-    {
-      "id": 1,
-      "nombre": "Contabilidad",
-      "descripcion": "Departamento de finanzas",
-      "servidor_id": "local",
-      "empresa_cod": "001"
-    }
+    { "id": 1, "nombre": "Contabilidad", "descripcion": "...", "servidor_id": "local", "empresa_cod": "001" }
   ]
 }
 ```
 
 ---
 
-#### `POST /api/departamentos/` 🔒🔑
+#### `POST /api/departamentos/` 🔒🔑 → `201`
 
-Crea un nuevo departamento.
-
-**Headers:** `X-Admin-Key: <clave>`
-
-**Request body:**
 ```json
-{
-  "nombre":      "Recursos Humanos",
-  "descripcion": "Gestión de personal",
-  "servidor_id": "local",
-  "empresa_cod": "001"
-}
+{ "nombre": "Recursos Humanos", "descripcion": "Gestión de personal", "servidor_id": "local", "empresa_cod": "001" }
 ```
 
 ---
 
 #### `DELETE /api/departamentos/{id}` 🔒🔑
 
-Elimina un departamento y todas sus asignaciones de usuarios en cascada.
+Elimina el departamento y sus asignaciones de usuarios en cascada.
 
 ---
 
 #### `POST /api/departamentos/asignar-usuario` 🔒🔑
 
-Asigna un usuario a un departamento con un rol específico.  
-Si el usuario ya existe en ese departamento, actualiza su rol.
+Asigna un usuario a un departamento. Si ya existe, actualiza su rol.
 
-**Request body:**
 ```json
-{
-  "cod_usuario":     "U001",
-  "departamento_id": 1,
-  "rol":             "jefe"
-}
+{ "cod_usuario": "U001", "departamento_id": 1, "rol": "jefe" }
 ```
 
-**Roles válidos:** `admin`, `jefe`, `empleado`
+**Roles válidos:** `admin` · `jefe` · `empleado`
 
 ---
 
-#### `DELETE /api/departamentos/usuarios/{asignacion_id}` 🔒🔑
+#### `DELETE /api/departamentos/asignaciones/{asignacion_id}` 🔒🔑
 
 Remueve a un usuario de un departamento.
 
@@ -399,13 +569,12 @@ Remueve a un usuario de un departamento.
 
 #### `GET /api/departamentos/{id}/usuarios` 🔒🔑
 
-Lista los usuarios asignados a un departamento con sus roles.
+Lista los usuarios de un departamento con sus roles. Paginado.
 
-**Response `200`:**
 ```json
 {
-  "status": "success",
-  "departamento": "Contabilidad",
+  "status": "success", "departamento": "Contabilidad",
+  "total": 2, "pagina": 1, "tamano": 20, "paginas": 1,
   "usuarios": [
     { "id": 1, "cod_usuario": "U001", "rol": "jefe" },
     { "id": 2, "cod_usuario": "U002", "rol": "empleado" }
@@ -419,28 +588,14 @@ Lista los usuarios asignados a un departamento con sus roles.
 
 #### `GET /api/apps/mis-apps` 🔒
 
-Devuelve las aplicaciones visibles para el usuario según sus roles en los departamentos. **Este es el endpoint principal del hub.**
+**Endpoint principal del hub.** Devuelve las apps visibles para el usuario según sus roles.
 
-**Response `200`:**
 ```json
 {
   "status": "success",
   "roles": ["jefe"],
   "apps": [
-    {
-      "name":        "Sistema de Ventas",
-      "version":     "1.2.0",
-      "description": "Gestión y seguimiento de ventas",
-      "href":        "http://192.168.1.10:8080/ventas",
-      "permissions": ["admin", "jefe", "empleado"]
-    },
-    {
-      "name":        "Panel de Reportes",
-      "version":     "2.0.1",
-      "description": "Reportes gerenciales",
-      "href":        "http://192.168.1.10:8080/reportes",
-      "permissions": ["admin", "jefe"]
-    }
+    { "name": "Sistema ERP", "version": "2.1.0", "description": "...", "href": "http://erp.local", "permissions": ["admin","jefe"] }
   ]
 }
 ```
@@ -451,20 +606,21 @@ Devuelve las aplicaciones visibles para el usuario según sus roles en los depar
 
 #### `GET /api/apps/` 🔒🔑
 
-Lista todas las apps registradas con sus permisos.
+Lista todas las apps registradas. Paginado.
+
+```
+GET /api/apps/?pagina=1&tamano=20
+```
 
 ---
 
-#### `POST /api/apps/` 🔒🔑
+#### `POST /api/apps/` 🔒🔑 → `201`
 
-Registra una nueva aplicación en `apps.json`.
-
-**Request body:**
 ```json
 {
   "name":        "Sistema de Inventario",
-  "version":     "3.0.0",
-  "description": "Control de inventario y almacén",
+  "version":     "1.0.0",
+  "description": "Control de almacén",
   "href":        "http://192.168.1.10:9090/inventario",
   "permissions": ["admin", "jefe"]
 }
@@ -474,32 +630,53 @@ Registra una nueva aplicación en `apps.json`.
 
 #### `PUT /api/apps/{nombre}` 🔒🔑
 
-Actualiza los datos de una app existente (campos opcionales).
+Actualiza campos específicos (todos opcionales):
 
-**Request body:**
 ```json
-{
-  "version":     "3.1.0",
-  "permissions": ["admin", "jefe", "empleado"]
-}
+{ "version": "1.1.0", "permissions": ["admin", "jefe", "empleado"] }
 ```
 
 ---
 
 #### `DELETE /api/apps/{nombre}` 🔒🔑
 
-Elimina una app del catálogo.
+Elimina la app del catálogo.
 
 ---
 
 #### `POST /api/apps/{nombre}/permisos` 🔒🔑
 
-Reemplaza los permisos de una app por los nuevos indicados.
+Reemplaza los permisos de la app:
 
-**Request body:**
+```json
+{ "permissions": ["admin"] }
+```
+
+---
+
+### Auditoría
+
+#### `GET /api/audit/` 🔒🔑
+
+Consulta el registro de auditoría del servidor del usuario. Soporta filtros y paginación.
+
+```
+GET /api/audit/?pagina=1&tamano=50&cod_usuario=U001&accion=LOGIN
+```
+
+**Response:**
 ```json
 {
-  "permissions": ["admin"]
+  "status": "success", "total": 42, "pagina": 1, "tamano": 50, "paginas": 1,
+  "registros": [
+    {
+      "id": 42,
+      "timestamp": "2026-05-01T14:32:05",
+      "cod_usuario": "U001",
+      "accion": "LOGIN",
+      "detalle": "usuario=jperez"
+    }
+  ]
 }
 ```
 
@@ -507,54 +684,54 @@ Reemplaza los permisos de una app por los nuevos indicados.
 
 ## Sistema de roles y visibilidad
 
-### Roles disponibles
+### Roles
 
-| Rol | Descripción |
+| Rol | Descripción típica |
 |---|---|
-| `admin` | Administrador del sistema. Acceso total. |
-| `jefe` | Jefe de departamento. Ve apps de gestión y operativas. |
-| `empleado` | Empleado regular. Ve solo apps operativas básicas. |
+| `admin` | Acceso total al hub y sus apps de administración |
+| `jefe` | Ve apps de gestión de su área + apps operativas |
+| `empleado` | Ve únicamente apps operativas básicas |
 
-### Cómo se determina la visibilidad
+### Lógica de visibilidad
 
-1. El usuario se autentica → obtiene un JWT con su `cod_usuario` y `servidor_id`
-2. Al llamar a `GET /api/apps/mis-apps`, el hub consulta MySQL y obtiene **todos los roles** del usuario en todos sus departamentos
-3. Se filtran las apps de `apps.json` donde `permissions` contenga al menos uno de esos roles
-4. Un usuario en varios departamentos obtiene la **unión** de apps de todos sus roles
+1. Usuario hace login → recibe JWT con `cod_usuario` y `servidor_id`
+2. `GET /api/apps/mis-apps` consulta MySQL → obtiene **todos los roles** del usuario en todos sus departamentos
+3. Filtra `apps.json` → devuelve apps donde `permissions` contenga **al menos uno** de esos roles
+4. Un usuario en múltiples departamentos obtiene la **unión** de sus roles
 
-### Ejemplo práctico
+### Ejemplo
 
 ```
 Usuario U001:
-  - Departamento "Contabilidad" → rol: jefe
-  - Departamento "Proyectos"    → rol: empleado
+  Departamento "Contabilidad" → rol: jefe
+  Departamento "Proyectos"    → rol: empleado
 
-Apps disponibles:
-  - "ERP Financiero"   permissions: ["admin", "jefe"]      → ✅ visible (tiene jefe)
-  - "Sistema de Obras" permissions: ["admin", "jefe", "empleado"] → ✅ visible (tiene empleado)
-  - "Panel Admin"      permissions: ["admin"]               → ❌ no visible
+Apps:
+  "ERP Financiero"    permissions: ["admin","jefe"]             → ✅ visible
+  "Portal de Obras"   permissions: ["admin","jefe","empleado"]  → ✅ visible
+  "Panel Admin"       permissions: ["admin"]                    → ❌ no visible
 ```
 
 ---
 
 ## Formato de apps.json
 
-Archivo ubicado en `hub_central/jsons/apps.json`. Se gestiona automáticamente a través de la API.
+`hub_central/jsons/apps.json` — gestionado automáticamente por la API.
 
 ```json
 {
     "apps": [
         {
-            "name":        "Sistema de Ventas",
-            "version":     "1.2.0",
-            "description": "Gestión y seguimiento de ventas",
-            "href":        "http://192.168.1.10:8080/ventas",
+            "name":        "Sistema ERP",
+            "version":     "2.1.0",
+            "description": "Gestión empresarial integrada",
+            "href":        "http://192.168.1.10:8080/erp",
             "permissions": ["admin", "jefe", "empleado"]
         },
         {
             "name":        "Panel de Reportes",
-            "version":     "2.0.1",
-            "description": "Reportes gerenciales y estadísticas",
+            "version":     "1.5.0",
+            "description": "Reportes y estadísticas gerenciales",
             "href":        "http://192.168.1.10:8080/reportes",
             "permissions": ["admin", "jefe"]
         },
@@ -569,74 +746,95 @@ Archivo ubicado en `hub_central/jsons/apps.json`. Se gestiona automáticamente a
 }
 ```
 
-| Campo | Tipo | Descripción |
-|---|---|---|
-| `name` | string | Nombre único de la app (actúa como identificador) |
-| `version` | string | Versión actual de la app |
-| `description` | string | Descripción breve (opcional) |
-| `href` | string | URL de acceso a la aplicación |
-| `permissions` | string[] | Roles que pueden ver esta app |
+| Campo | Tipo | Requerido | Descripción |
+|---|---|---|---|
+| `name` | string | ✅ | Identificador único de la app |
+| `version` | string | ✅ | Versión semántica |
+| `description` | string | — | Descripción breve |
+| `href` | string | ✅ | URL de acceso a la app |
+| `permissions` | string[] | ✅ | Roles con acceso: `admin`, `jefe`, `empleado` |
 
 ---
 
-## Flujo de autenticación
+## Flujo completo de sesión
 
 ```
-1. POST /api/auth/login
-   body: { servidor, password }
-        │
-        ▼
-2. El hub busca el servidor en connections.json
-   y se conecta con la cuenta de servicio (hub_user/hub_pass)
-        │
-        ▼
-3. Consulta la tabla USUARIOS del servidor remoto
-   Valida: NEWPASS == encriptar(password)
-   Verifica: BLOQUEADO != 'T' y DESCATALOGADO != 'T'
-        │
-        ▼
-4. Genera JWT (8 horas)
-   payload: { sub: CODUSUARIO, usuario: USUARIO, servidor_id }
-        │
-        ▼
-5. Cliente usa el token en cada request:
-   Authorization: Bearer <token>
-        │
-        ▼
-6. GET /api/apps/mis-apps
-   → Busca roles en MySQL (tabla usuarios_departamentos)
-   → Filtra apps.json según roles
-   → Devuelve apps visibles
+┌─────────────────────────────────────────────────────────────────┐
+│  INICIO DE SESIÓN                                               │
+│                                                                 │
+│  POST /api/auth/login { servidor, password }                    │
+│       │                                                         │
+│       ├─ Consulta USUARIOS en servidor remoto                   │
+│       ├─ Valida contraseña (encriptación legado)                │
+│       ├─ Genera access_token  (JWT, 8 horas)                    │
+│       ├─ Genera refresh_token (64 bytes, 7 días, guardado en DB)│
+│       └─ Registra LOGIN en auditoría                            │
+│                                                                 │
+│  USO NORMAL (acciones con access_token)                         │
+│       │                                                         │
+│       ├─ GET /api/apps/mis-apps → apps filtradas por rol        │
+│       ├─ GET /api/departamentos/ → mis departamentos            │
+│       └─ ... otros endpoints 🔒                                 │
+│                                                                 │
+│  RENOVACIÓN (access_token expirado, refresh_token válido)       │
+│       │                                                         │
+│       └─ POST /api/auth/refresh { refresh_token }               │
+│              └─ Devuelve nuevo access_token                     │
+│                                                                 │
+│  CIERRE DE SESIÓN                                               │
+│       │                                                         │
+│       └─ POST /api/auth/logout { refresh_token }                │
+│              └─ Revoca el refresh_token en BD                   │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## connections.json
+## Paginación
 
-Archivo de configuración de servidores remotos en `hub_central/jsons/connections.json`. Se gestiona a través del endpoint `/api/servidores/registrar`.
+Todos los endpoints de listado aceptan los parámetros:
 
+| Parámetro | Tipo | Default | Máximo | Descripción |
+|---|---|---|---|---|
+| `pagina` | int | 1 | — | Número de página (base 1) |
+| `tamano` | int | 20 | 100–200 | Resultados por página |
+
+**Estructura de respuesta paginada:**
 ```json
 {
-    "servidores": {
-        "sede_central": {
-            "host":     "192.168.1.10",
-            "puerto":   5432,
-            "db_name":  "db_corporativa",
-            "tipo":     "postgresql",
-            "hub_user": "coreUser",
-            "hub_pass": "password_de_servicio"
-        },
-        "local": {
-            "host":     "10.10.10.212",
-            "puerto":   1433,
-            "db_name":  "GENERAL",
-            "tipo":     "mssql",
-            "driver":   "SQL Server",
-            "hub_user": "sa",
-            "hub_pass": "password_de_servicio"
-        }
-    }
+  "status":  "success",
+  "total":   150,
+  "pagina":  2,
+  "tamano":  20,
+  "paginas": 8,
+  "data":    [...]
 }
+```
+
+**Endpoints paginados:**
+- `GET /api/departamentos/`
+- `GET /api/departamentos/{id}/usuarios`
+- `GET /api/apps/`
+- `GET /api/servidores/listarEmpresas`
+- `GET /api/servidores/listarEmpresasUsuario`
+- `GET /api/audit/`
+
+---
+
+## Despliegue rápido
+
+```bash
+# Desarrollo local
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+
+# Producción con Docker
+docker compose up -d
+
+# Ver logs
+docker compose logs -f hub
+
+# Correr tests
+pytest tests/ -v
 ```
 
 ---
