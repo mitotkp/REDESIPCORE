@@ -1,0 +1,42 @@
+services:
+
+  mysql:
+    image: mysql:8.0
+    container_name: redesipcore_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASS:-root_redesipcore}
+      MYSQL_DATABASE: ${MYSQL_DB:-redesipcore_hub}
+      MYSQL_USER: ${MYSQL_USER:-hub_user}
+      MYSQL_PASSWORD: ${MYSQL_PASS:-hub_pass}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  hub:
+    build: .
+    container_name: redesipcore_hub
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Sobreescribe MYSQL_HOST para apuntar al contenedor, no a localhost
+      MYSQL_HOST: mysql
+    depends_on:
+      mysql:
+        condition: service_healthy
+    volumes:
+      # Persiste connections.json y apps.json fuera del contenedor
+      - ./hub_central/jsons:/app/hub_central/jsons
+
+volumes:
+  mysql_data:

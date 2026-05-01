@@ -1,89 +1,46 @@
-import os
-from fastapi import APIRouter, HTTPException, Depends, Header
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
-from jose import jwt
-from dotenv import load_dotenv
 
 from hub_central.classes.models import AppCreate, AppUpdate, AppPermisos
 from hub_central.database.database import get_db
 from hub_central.database.models import UsuarioDepartamento, ROLES_VALIDOS
 from hub_central.helpers.apps_helper import obtener_apps, guardar_apps, buscar_app
-
-load_dotenv()
-
-api_key   = os.getenv("SECRET_KEY")
-algoritmo = os.getenv("ALGORITHM")
-security_scheme = HTTPBearer()
+from hub_central.helpers.auth_deps import obtener_payload, verificar_admin
 
 router = APIRouter(prefix="/api/apps", tags=["Aplicaciones"])
 
-
-def obtener_payload(credenciales: HTTPAuthorizationCredentials = Depends(security_scheme)):
-    token = credenciales.credentials
-    try:
-        return jwt.decode(token, api_key, algorithms=[algoritmo])
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="El token ha expirado.")
-    except jwt.JWTError:
-        raise HTTPException(status_code=401, detail="Token inválido o corrupto.")
-
-
-def verificar_admin(x_admin_key: str | None = Header(default=None)):
-    admin_secret = os.getenv("ADMIN_SECRET")
-    if not admin_secret or x_admin_key != admin_secret:
-        raise HTTPException(
-            status_code=403,
-            detail="Acceso denegado. Se requiere clave de administrador."
-        )
-
-
-# ── Endpoints públicos (sólo JWT) ──────────────────────────────────────────
 
 @router.get("/mis-apps")
 async def mis_apps(
     payload: dict = Depends(obtener_payload),
     db: Session = Depends(get_db),
 ):
-    """Devuelve las apps visibles para el usuario según su rol en los departamentos."""
     cod_usuario = payload["sub"]
     servidor_id = payload["servidor_id"]
 
-    asignaciones = (
-        db.query(UsuarioDepartamento)
-        .filter(
-            UsuarioDepartamento.cod_usuario == cod_usuario,
-            UsuarioDepartamento.servidor_id == servidor_id,
-        )
-        .all()
-    )
+    asignaciones = db.query(UsuarioDepartamento).filter(
+        UsuarioDepartamento.cod_usuario == cod_usuario,
+        UsuarioDepartamento.servidor_id == servidor_id,
+    ).all()
 
     roles_usuario = list({a.rol for a in asignaciones})
 
     if not roles_usuario:
         return {"status": "success", "roles": [], "apps": []}
 
-    data = obtener_apps()
     apps_visibles = [
-        app for app in data["apps"]
+        app for app in obtener_apps()["apps"]
         if any(rol in app.get("permissions", []) for rol in roles_usuario)
     ]
 
-    return {
-        "status": "success",
-        "roles":  roles_usuario,
-        "apps":   apps_visibles,
-    }
+    return {"status": "success", "roles": roles_usuario, "apps": apps_visibles}
 
-
-# ── Endpoints administrativos (JWT + X-Admin-Key) ──────────────────────────
 
 @router.get("/")
 async def listar_apps(
     payload: dict = Depends(obtener_payload),
     _: None = Depends(verificar_admin),
 ):
-    """Lista todas las apps registradas con sus permisos."""
     return {"status": "success", "apps": obtener_apps()["apps"]}
 
 
@@ -100,8 +57,7 @@ async def crear_app(
             detail=f"Roles inválidos: {roles_invalidos}. Permitidos: {ROLES_VALIDOS}",
         )
 
-    app_existente, _ = buscar_app(datos.name)
-    if app_existente:
+    if buscar_app(datos.name)[0] is not None:
         raise HTTPException(status_code=409, detail=f"Ya existe una app llamada '{datos.name}'.")
 
     nueva_app = {
@@ -111,7 +67,6 @@ async def crear_app(
         "href":        datos.href,
         "permissions": datos.permissions,
     }
-
     data = obtener_apps()
     data["apps"].append(nueva_app)
     guardar_apps(data)
@@ -138,9 +93,7 @@ async def actualizar_app(
                 detail=f"Roles inválidos: {roles_invalidos}. Permitidos: {ROLES_VALIDOS}",
             )
 
-    cambios = datos.model_dump(exclude_none=True)
-    app.update(cambios)
-
+    app.update(datos.model_dump(exclude_none=True))
     data = obtener_apps()
     data["apps"][idx] = app
     guardar_apps(data)
@@ -184,13 +137,8 @@ async def actualizar_permisos(
         raise HTTPException(status_code=404, detail=f"App '{nombre}' no encontrada.")
 
     app["permissions"] = datos.permissions
-
     data = obtener_apps()
     data["apps"][idx] = app
     guardar_apps(data)
 
-    return {
-        "status":      "success",
-        "app":         nombre,
-        "permissions": datos.permissions,
-    }
+    return {"status": "success", "app": nombre, "permissions": datos.permissions}

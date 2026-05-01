@@ -1,26 +1,22 @@
 import os
-from fastapi import APIRouter, HTTPException
-from fastapi.security import HTTPBearer
-from sqlalchemy import create_engine, text
 from datetime import datetime, timedelta
+from fastapi import APIRouter, HTTPException
+from sqlalchemy import create_engine, text
 from jose import jwt
 from dotenv import load_dotenv
+
 from hub_central.helpers.encryption import Encriptacion
 from hub_central.helpers.connection_helper import construir_url_desde_config
-from hub_central.classes.models import CredencialesLogin
 from hub_central.helpers.jsonsPath import obtener_json_path
+from hub_central.classes.models import CredencialesLogin
 
 load_dotenv()
 
-api_key   = os.getenv("SECRET_KEY")
-algoritmo = os.getenv("ALGORITHM")
+_api_key   = os.getenv("SECRET_KEY")
+_algoritmo = os.getenv("ALGORITHM")
 
-security_scheme = HTTPBearer()
+router = APIRouter(prefix="/api/auth", tags=["Autenticacion"])
 
-router = APIRouter(
-    prefix="/api/auth",
-    tags=["Autenticacion"]
-)
 
 @router.post("/login")
 async def login_de_usuario(datos: CredencialesLogin):
@@ -74,12 +70,10 @@ async def login_de_usuario(datos: CredencialesLogin):
                 "exp":         datetime.utcnow() + timedelta(hours=8),
             }
 
-            token = jwt.encode(payload, api_key, algorithm=algoritmo)
-
             return {
                 "status":       "success",
                 "message":      "login exitoso",
-                "access_token": token,
+                "access_token": jwt.encode(payload, _api_key, algorithm=_algoritmo),
                 "token_type":   "bearer",
             }
 

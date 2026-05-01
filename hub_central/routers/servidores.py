@@ -1,31 +1,17 @@
 import json
-import os
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy import create_engine
-from jose import jwt
-from dotenv import load_dotenv
+
 from hub_central.classes.models import ServidorRegistro
 from hub_central.helpers.db_helper import ejecutar_consulta
 from hub_central.helpers.jsonsPath import obtener_json_path
-from hub_central.helpers.connection_helper import construir_url_conexion, construir_url_desde_config
+from hub_central.helpers.connection_helper import construir_url_conexion
+from hub_central.helpers.auth_deps import obtener_payload
 
-load_dotenv()
+router = APIRouter(prefix="/api/servidores", tags=["Servidores"])
 
-api_key   = os.getenv("SECRET_KEY")
-algoritmo = os.getenv("ALGORITHM")
-
-security_scheme = HTTPBearer()
-
-router = APIRouter(
-    prefix="/api/servidores",
-    tags=["Servidores"]
-)
-
-# Ruta del archivo de configuración
-_BASE_DIR    = Path(__file__).resolve().parent.parent
-_SERVERS_PATH = _BASE_DIR / "jsons" / "connections.json"
+_SERVERS_PATH = Path(__file__).resolve().parent.parent / "jsons" / "connections.json"
 
 
 def _guardar_config(config: dict) -> None:
@@ -36,8 +22,7 @@ def _guardar_config(config: dict) -> None:
 
 @router.get("/")
 async def listar_servidores():
-    servers_config = obtener_json_path()
-    nombres = list(servers_config["servidores"].keys())
+    nombres = list(obtener_json_path()["servidores"].keys())
     return {"total": len(nombres), "servidores_disponibles": nombres}
 
 
@@ -64,7 +49,7 @@ async def registrar_servidor(datos: ServidorRegistro):
     try:
         engine = create_engine(url_prueba, pool_pre_ping=True)
         with engine.connect():
-            print(f"Test de conexión exitoso para: {datos.servidor}")
+            pass
     except Exception as e:
         print(f"Error de conexión: {e}")
         raise HTTPException(
@@ -86,10 +71,7 @@ async def registrar_servidor(datos: ServidorRegistro):
     servers_config["servidores"][datos.servidor] = nuevo
     _guardar_config(servers_config)
 
-    return {
-        "status":  "success",
-        "mensaje": f"Servidor '{datos.servidor}' verificado y registrado correctamente.",
-    }
+    return {"status": "success", "mensaje": f"Servidor '{datos.servidor}' registrado correctamente."}
 
 
 @router.post("/login")
@@ -111,63 +93,31 @@ async def iniciar_sesion(server: str, user: str, password: str):
     )
 
     try:
-        engine = create_engine(url)
-        with engine.connect():
+        with create_engine(url).connect():
             return {"status": "success", "mensaje": "Autenticado en la DB remota"}
     except Exception:
         raise HTTPException(status_code=401, detail="Credenciales incorrectas en el servidor remoto")
 
 
 @router.get("/listarEmpresas")
-async def listar_empresas(credenciales: HTTPAuthorizationCredentials = Depends(security_scheme)):
-    token = credenciales.credentials
-    try:
-        payload  = jwt.decode(token, api_key, algorithms=[algoritmo])
-        servidor = payload["servidor_id"]
-
-        query = """
-            SELECT
-                CODEMPRESA
-                , TITULO
-                , PATHBD
-                , PAIS
-            FROM
-                EMPRESAS
-        """
-        empresas = ejecutar_consulta(servidor, query)
-        return {"status": "success", "empresas": empresas}
-
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="El token ha expirado.")
-    except jwt.JWTError:
-        raise HTTPException(status_code=401, detail="Token invalido o corrupto.")
+async def listar_empresas(payload: dict = Depends(obtener_payload)):
+    empresas = ejecutar_consulta(
+        payload["servidor_id"],
+        "SELECT CODEMPRESA, TITULO, PATHBD, PAIS FROM EMPRESAS",
+    )
+    return {"status": "success", "empresas": empresas}
 
 
 @router.get("/listarEmpresasUsuario")
-async def listar_empresa_usuario(credenciales: HTTPAuthorizationCredentials = Depends(security_scheme)):
-    token = credenciales.credentials
-    try:
-        payload     = jwt.decode(token, api_key, algorithms=[algoritmo])
-        servidor    = payload["servidor_id"]
-        cod_usuario = payload["sub"]
-
-        query = """
-            SELECT DISTINCT
-                EU.CODEMPRESA,
-                EU.CODUSUARIO,
-                E.TITULO,
-                E.PATHBD,
-                E.PAIS
-            FROM
-                EMPRESASUSUARIO EU
-                INNER JOIN EMPRESAS E ON E.CODEMPRESA = EU.CODEMPRESA
-            WHERE
-                EU.CODUSUARIO = :codUsuario
-        """
-        empresas_usuario = ejecutar_consulta(servidor, query, {"codUsuario": cod_usuario})
-        return {"status": "success", "empresas": empresas_usuario}
-
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="El token ha expirado.")
-    except jwt.JWTError:
-        raise HTTPException(status_code=401, detail="Token invalido o corrupto.")
+async def listar_empresa_usuario(payload: dict = Depends(obtener_payload)):
+    query = """
+        SELECT DISTINCT
+            EU.CODEMPRESA, EU.CODUSUARIO, E.TITULO, E.PATHBD, E.PAIS
+        FROM
+            EMPRESASUSUARIO EU
+            INNER JOIN EMPRESAS E ON E.CODEMPRESA = EU.CODEMPRESA
+        WHERE
+            EU.CODUSUARIO = :codUsuario
+    """
+    empresas = ejecutar_consulta(payload["servidor_id"], query, {"codUsuario": payload["sub"]})
+    return {"status": "success", "empresas": empresas}
