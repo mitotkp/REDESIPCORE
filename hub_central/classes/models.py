@@ -1,7 +1,7 @@
 from pydantic import BaseModel
 
 
-# --- Servidores ---
+# ── Servidores ────────────────────────────────────────────────────────────────
 
 class ServidorRegistro(BaseModel):
     servidor: str
@@ -19,7 +19,15 @@ class CredencialesLogin(BaseModel):
     password: str
 
 
-# --- Departamentos ---
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
+
+
+class LogoutRequest(BaseModel):
+    refresh_token: str
+
+
+# ── Departamentos ─────────────────────────────────────────────────────────────
 
 class DepartamentoCreate(BaseModel):
     nombre:      str
@@ -34,14 +42,14 @@ class AsignarUsuario(BaseModel):
     rol:             str  # admin | jefe | empleado
 
 
-# --- Aplicaciones (apps.json) ---
+# ── Aplicaciones (apps.json) ──────────────────────────────────────────────────
 
 class AppCreate(BaseModel):
     name:        str
     version:     str
     description: str | None = None
     href:        str
-    permissions: list[str]   # ej: ["admin", "jefe"]
+    permissions: list[str]
 
 
 class AppUpdate(BaseModel):
