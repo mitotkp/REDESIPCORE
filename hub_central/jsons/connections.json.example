@@ -1,0 +1,13 @@
+{
+    "servidores": {
+        "nombre_servidor": {
+            "host":     "192.168.1.10",
+            "puerto":   1433,
+            "db_name":  "GENERAL",
+            "tipo":     "mssql",
+            "driver":   "SQL Server",
+            "hub_user": "usuario_servicio",
+            "hub_pass": "password_servicio"
+        }
+    }
+}
